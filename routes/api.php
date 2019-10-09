@@ -22,6 +22,10 @@ Route::group(['namespace'=>'Api'],function () {
         Route::post('login', 'LoginController@login');
         Route::post('register', 'RegisterController@register');
 
+
+
+        Route::get('login/{provider}', 'LoginController@redirectToProvider');
+        Route::get('login/{provider}/callback', 'LoginController@handleProviderCallback');
     });
 
 });

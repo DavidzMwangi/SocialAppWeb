@@ -3,13 +3,24 @@
 namespace App\Http\Controllers\Api\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Services\SocialUserResolver;
 use App\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Laravel\Passport\Client;
+use Laravel\Socialite\Facades\Socialite;
 
+
+
+use Carbon\Carbon;
+use Illuminate\Events\Dispatcher;
+use Laravel\Passport\Bridge\AccessToken;
+use Laravel\Passport\Bridge\AccessTokenRepository;
+use Laravel\Passport\Bridge\Scope;
+use Laravel\Passport\TokenRepository;
+use League\OAuth2\Server\CryptKey;
 class LoginController extends Controller
 {
     private $client;
@@ -78,51 +89,63 @@ class LoginController extends Controller
     }
 
 
-    public function recoverPassword(Request $request)
+    public function redirectToProvider($provider)
     {
-        $this->validate($request,[
-            'email'=>'required'
-        ]);
-
-        //send an email to the user with the password then change the password of the user to the confirmation code
-        $password=PasswordGenerator::createPassword();
-        $user= User::where('email',request('email'))->first();
-
-        if ($user==null){
-            //no such email exist in the database
-
-            return response()->json([
-                'error'=>'The email does not exist in the system'
-            ],422);
-        }else{
-            $user->password=bcrypt($password);
-            $user->save();
-
-            $user->notify(new RecoverPasswordNotification($password));
-
-            return response()->json([
-                'success'=>'The Password has been successfully sent to the email',
-                'code'=>$password
-            ]);
-        }
-
+        return Socialite::driver($provider)->redirect();
     }
 
-
-    public function changePassword(Request $request)
+    /**
+     * Obtain the user information from GitHub.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function handleProviderCallback($provider)
     {
 
-        $this->validate($request,[
-            'password'=>'required',
-        ]);
+        $user = Socialite::driver($provider)->user();
 
-        $user=Auth::user();
-        $user->password=bcrypt($request->password);
-        $user->save();
+        $savedUser=(new SocialUserResolver())->resolveUserByProviderCredentials($provider,$user->token);
+
+        if ($savedUser==null){
+            return  response()->json('The user was not found in the system',404);
+        }else{
+            //the user was found, use the user to get the access token
 
 
-        return response()->json();
-//        $this->refresh($request);
+            //determine if the access token already exist
+            $token = AccessToken::where('user_id', $savedUser->id)->where('expires_at', '>', Carbon::now())
+                ->orderBy('created_at', 'desc')->first();
 
+            if ($token===null){
+
+                $user = $savedUser;
+                $token = new AccessToken($user->id);
+                $token->setIdentifier(generateUniqueIdentifier());
+                $token->setClient(new Client(2, null, null));
+                $token->setExpiryDateTime(Carbon::now()->addYear());
+                $token->addScope(new Scope('activity'));
+                $privateKey = new CryptKey('file://'.storage_path('oauth-private.key'));
+
+                $accessTokenRepository = new AccessTokenRepository(new TokenRepository, new Dispatcher);
+                $accessTokenRepository->persistNewAccessToken($token);
+                $jwtAccessToken = $token->convertToJWT($privateKey);
+
+
+            }else{
+                $jwtAccessToken = $token->convertToJWT();
+
+
+            }
+
+            $responseParams = [
+                'token_type'   => 'Bearer',
+                'expires_in'   => 31622400,
+                'access_token' => (string) $jwtAccessToken,
+                'user'         => $user->toArray()
+            ];
+
+
+            return response()->json( $responseParams);
+        }
     }
 }
